@@ -1,0 +1,120 @@
+name: Build BariumOS
+
+on:
+  push:
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Fix slow Ubuntu mirror
+        run: |
+          echo "deb http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list
+          echo "deb http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          echo "deb http://archive.ubuntu.com/ubuntu noble-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+          fi
+      
+          sudo rm -f /etc/apt/apt-mirrors.txt
+          sudo apt-get update
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential \
+            bison \
+            flex \
+            libgmp3-dev \
+            libmpfr-dev \
+            libmpc-dev \
+            texinfo \
+            make \
+            nasm \
+            gcc-mingw-w64-x86-64 \
+            mtools \
+            dosfstools \
+            qemu-system-x86 \
+            curl
+
+      - name: Download toolchain
+        run: |
+          cd ~
+
+          curl -L \
+            https://github.com/NumanLUAU/barium-toolchain/releases/latest/download/release.zip \
+            -o release.zip
+
+          rm -rf $HOME/barium-toolchain
+          mkdir -p $HOME/barium-toolchain
+
+          unzip release.zip -d $HOME/barium-toolchain
+
+      - name: Add toolchain to PATH
+        run: |
+          echo "$HOME/barium-toolchain/bin" >> $GITHUB_PATH
+          echo "$HOME/barium-toolchain/libexec/gcc/x86_64-elf/13.2.0" >> $GITHUB_PATH
+
+      - name: Fix permissions
+        run: |
+          find $HOME/barium-toolchain -type f -exec chmod +x {} \;
+
+      - name: Build Barium
+        run: |
+          export PATH=$HOME/barium-toolchain/bin:$PATH
+          make
+
+      - name: Generate release info
+        id: release_info
+        shell: bash
+        run: |
+          DATE=$(date +'%d-%m-%y')
+          BASE="Release $DATE"
+
+          TAG_COUNT=$(gh release list --limit 100 | grep -c "$BASE" || true)
+
+          if [ "$TAG_COUNT" -eq 0 ]; then
+            RELEASE_NAME="$BASE"
+          else
+            NEXT=$((TAG_COUNT + 1))
+            RELEASE_NAME="$BASE v$NEXT"
+          fi
+
+          SAFE_TAG=$(echo "$RELEASE_NAME" | tr ' ' '-')
+
+          COMMIT_MSG=$(git log -1 --pretty=%s)
+
+          echo "release_name=$RELEASE_NAME" >> $GITHUB_OUTPUT
+          echo "tag_name=$SAFE_TAG" >> $GITHUB_OUTPUT
+
+          {
+            echo "body<<EOF"
+            echo "Build of commit:"
+            echo "$COMMIT_MSG"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag_name }}
+          name: ${{ steps.release_info.outputs.release_name }}
+          body: ${{ steps.release_info.outputs.body }}
+          files: barium.img
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
